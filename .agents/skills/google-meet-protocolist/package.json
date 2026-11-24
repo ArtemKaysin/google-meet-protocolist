@@ -1,0 +1,11 @@
+{
+  "name": "google-meet-protocolist",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

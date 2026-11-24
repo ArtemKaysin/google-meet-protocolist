@@ -1,0 +1,4 @@
+interface:
+  display_name: "Протоколист Google Meet"
+  short_description: "Поиск встреч и сводки по готовым расшифровкам"
+  default_prompt: "Используй $google-meet-protocolist, найди встречи Business Booster Platform за прошлую календарную неделю и кратко подведи итоги с таймкодами."

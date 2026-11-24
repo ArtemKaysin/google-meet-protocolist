@@ -1,0 +1,3 @@
+*.dpapi
+.env
+storage-state*.json
