@@ -1,12 +1,4 @@
-export async function readCalendar(request, {
-  expectedAccount,
-  from,
-  to,
-  timeZone,
-  queries = [],
-  people = [],
-  calendarNames = [],
-}) {
+export function calendarWindow(from, to, timeZone) {
   const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
   const lower = Date.parse(from);
   const upper = Date.parse(to);
@@ -17,6 +9,19 @@ export async function readCalendar(request, {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
   });
+  return { lower, upper, formatter };
+}
+
+export async function readCalendar(request, {
+  expectedAccount,
+  from,
+  to,
+  timeZone,
+  queries = [],
+  people = [],
+  calendarNames = [],
+}) {
+  const { lower, upper, formatter } = calendarWindow(from, to, timeZone);
   const email = expectedAccount.trim().toLowerCase();
   const origin = 'https://calendar.google.com';
   const dayMs = 86_400_000;

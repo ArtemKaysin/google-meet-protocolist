@@ -55,8 +55,9 @@ export async function checkGoogleSession(request, expectedAccount) {
   }
 }
 
-export async function readDrive(request, { fileId, mode = 'captions', offset = 0, limit = 160, language = 'ru' }) {
+export async function readDrive(request, { fileId, resourceKey, mode = 'captions', offset = 0, limit = 160, language = 'ru' }) {
   if (!/^[A-Za-z0-9_-]{10,200}$/.test(fileId ?? '')) throw new Error('Pass a verified Drive file ID.');
+  if (resourceKey && !/^[A-Za-z0-9_-]{1,200}$/.test(resourceKey)) throw new Error('Invalid Drive sharing link.');
   if (!['captions', 'metadata'].includes(mode)) throw new Error('Use captions or metadata mode.');
   if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(language)) throw new Error('Pass a valid track language.');
   if (!Number.isInteger(offset) || offset < 0 ||
@@ -66,6 +67,7 @@ export async function readDrive(request, { fileId, mode = 'captions', offset = 0
 
   if (mode === 'metadata') {
     const url = new URL('/file/d/' + fileId + '/view', origin);
+    if (resourceKey) url.searchParams.set('resourcekey', resourceKey);
     const response = await request.get(url.href, requestOptions);
     try {
       const status = response.status();
@@ -93,6 +95,7 @@ export async function readDrive(request, { fileId, mode = 'captions', offset = 0
   url.search = new URLSearchParams({
     id: fileId, type: 'track', lang: language, kind: 'asr', fmt: 'json3', xospf: '1',
   });
+  if (resourceKey) url.searchParams.set('resourcekey', resourceKey);
   async function get(start) {
     let next = new URL(start);
     for (let hop = 0; hop < 4; hop++) {
@@ -127,6 +130,7 @@ export async function readDrive(request, { fileId, mode = 'captions', offset = 0
   if (!rows.length) {
     const listUrl = new URL('/timedtext', origin);
     listUrl.search = new URLSearchParams({ id: fileId, v: fileId, type: 'list', hl: language, vssids: '1' });
+    if (resourceKey) listUrl.searchParams.set('resourcekey', resourceKey);
     const list = await get(listUrl);
     if (list.sessionRequired) return { fileId, state: 'session_required', status: list.status };
     const languages = Array.from((list.body ?? '').matchAll(/<track\b[^>]*\blang_code="([^"]+)"/gi), match => match[1]);

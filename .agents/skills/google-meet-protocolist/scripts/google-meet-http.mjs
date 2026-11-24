@@ -1,13 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { chromium, request } from 'playwright-core';
-import { readCalendar } from './calendar-http.mjs';
+import { calendarWindow, readCalendar } from './calendar-http.mjs';
 import { checkGoogleSession, readDrive } from './drive-http.mjs';
-import { timeWindow } from './google-meet.mjs';
+import { driveReference, findDriveVideos } from './drive-search.mjs';
 import { googleStorageState, loadSession, saveSession } from './session-store.mjs';
 
 const driveHome = 'https://drive.google.com/drive/u/0/my-drive';
-const commands = new Set(['status', 'login', 'list', 'metadata', 'captions']);
+const commands = new Set(['status', 'login', 'list', 'videos', 'metadata', 'captions']);
 const report = value => console.log(JSON.stringify(value));
 const progress = value => console.error(JSON.stringify(value));
 
@@ -73,7 +73,8 @@ function readOptions() {
       account: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' },
       'time-zone': { type: 'string' }, query: { type: 'string', multiple: true },
       person: { type: 'string', multiple: true }, calendar: { type: 'string', multiple: true },
-      'file-id': { type: 'string', multiple: true }, language: { type: 'string' },
+      'file-id': { type: 'string', multiple: true }, file: { type: 'string', multiple: true }, language: { type: 'string' },
+      folder: { type: 'string' }, 'folder-name': { type: 'string' }, recursive: { type: 'boolean' },
       offset: { type: 'string' }, limit: { type: 'string' }, 'no-login': { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -83,14 +84,21 @@ function readOptions() {
   if (!commands.has(command) || positionals.length !== 1) throw new Error('Unknown command.');
   const account = values.account?.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account ?? '')) throw new Error('Pass the expected Google email with --account.');
-  if (command === 'list') {
-    timeWindow(values.from, values.to);
-    if (!values['time-zone']) throw new Error('Pass the user’s IANA time zone with --time-zone.');
-    new Intl.DateTimeFormat('en', { timeZone: values['time-zone'] });
+  if (command === 'list') calendarWindow(values.from, values.to, values['time-zone']);
+  const folder = values.folder?.trim();
+  const folderName = values['folder-name']?.trim();
+  if (command === 'videos') {
+    if (!values.query?.some(title => title.trim()) && !folder && !folderName) {
+      throw new Error('Pass --query, --folder or --folder-name.');
+    }
+    if ((folder && (folderName || !driveReference(folder, 'folder'))) || (values.recursive && !folder && !folderName)) {
+      throw new Error('Pass one valid Drive folder link, ID or name.');
+    }
   }
-  if (['metadata', 'captions'].includes(command) &&
-      (!values['file-id']?.length || values['file-id'].some(id => !/^[\w-]{10,200}$/.test(id)))) {
-    throw new Error('Pass at least one verified --file-id.');
+  const files = [...(values['file-id'] ?? []).map(id => /^[A-Za-z0-9_-]{10,200}$/.test(id) ? { id } : null),
+    ...(values.file ?? []).map(url => driveReference(url, 'file'))];
+  if (['metadata', 'captions'].includes(command) && (!files.length || files.some(file => !file))) {
+    throw new Error('Pass at least one verified --file-id or --file Drive link.');
   }
   const offset = values.offset === undefined ? 0 : Number(values.offset);
   const limit = values.limit === undefined ? null : Number(values.limit);
@@ -101,18 +109,19 @@ function readOptions() {
   if (values.language && !/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(values.language)) {
     throw new Error('Pass a valid Google Drive track language.');
   }
-  return { command, values, account, offset, limit };
+  return { command, values, account, offset, limit, folder, folderName, files };
 }
 
 async function main() {
   const input = readOptions();
   if (!input) {
-    console.log('google-meet-http.mjs status|login|list|metadata|captions --account EMAIL');
+    console.log('google-meet-http.mjs status|login|list|videos|metadata|captions --account EMAIL');
     console.log('list --from RFC3339 --to RFC3339 --time-zone IANA [--query TITLE] [--person EMAIL] [--calendar NAME]');
-    console.log('metadata|captions --file-id ID [--file-id ID] [--language ru] [--offset 0] [--limit 160]');
+    console.log('videos [--query TITLE] [--folder URL_OR_ID | --folder-name NAME] [--recursive]');
+    console.log('metadata|captions [--file-id ID | --file URL] [--language ru] [--offset 0] [--limit 160]');
     return;
   }
-  const { command, values, account, offset, limit } = input;
+  const { command, values, account, offset, limit, folder, folderName, files } = input;
   const saved = await loadSession(account);
   let connection = saved ? await openRequest(saved, account) : { result: { state: 'session_required' } };
   const canSignIn = command !== 'status' && !values['no-login'];
@@ -131,11 +140,14 @@ async function main() {
         expectedAccount: account, from: values.from, to: values.to, timeZone: values['time-zone'],
         queries: values.query, people: values.person, calendarNames: values.calendar,
       }));
+    } else if (command === 'videos') {
+      report(await findDriveVideos(http, { queries: values.query, folder, folderName, recursive: values.recursive }));
     } else if (command === 'metadata' || command === 'captions') {
-      const files = await Promise.all(values['file-id'].map(fileId => readDrive(http, {
-        fileId, mode: command, offset, limit, language: values.language,
+      const unique = [...new Map(files.map(file => [file.id, file])).values()];
+      const results = await Promise.all(unique.map(({ id, resourceKey }) => readDrive(http, {
+        fileId: id, resourceKey, mode: command, offset, limit, language: values.language,
       })));
-      report(files.length === 1 ? files[0] : { state: files.every(file => file.state === 'ready') ? 'ready' : 'partial', files });
+      report(results.length === 1 ? results[0] : { state: results.every(file => file.state === 'ready') ? 'ready' : 'partial', files: results });
     } else {
       report(result);
     }
