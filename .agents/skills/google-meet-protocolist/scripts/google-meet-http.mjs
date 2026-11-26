@@ -1,12 +1,14 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { chromium, request } from 'playwright-core';
-import { calendarWindow, readCalendar } from './calendar-http.mjs';
+import { calendarWeekMatchesAccount, calendarWindow, readCalendar } from './calendar-http.mjs';
 import { checkGoogleSession, readDrive } from './drive-http.mjs';
 import { driveReference, findDriveVideos } from './drive-search.mjs';
 import { googleStorageState, loadSession, saveSession } from './session-store.mjs';
 
 const driveHome = 'https://drive.google.com/drive/u/0/my-drive';
+const calendarHome = 'https://calendar.google.com/calendar/u/0/r';
+const macOS = process.platform === 'darwin';
 const commands = new Set(['status', 'login', 'list', 'videos', 'metadata', 'captions']);
 const report = value => console.log(JSON.stringify(value));
 const progress = value => console.error(JSON.stringify(value));
@@ -19,7 +21,33 @@ async function openRequest(session, account) {
   return { result };
 }
 
-async function signIn(account) {
+async function calendarSession(http, account) {
+  const monday = new Date();
+  monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7);
+  let url = new URL(calendarHome + '/week/' + monday.toISOString().slice(0, 10).replaceAll('-', '/'));
+  for (let i = 0; i < 5; i++) {
+    let response;
+    try {
+      response = await http.get(url.href, { maxRedirects: 0, timeout: 10_000 });
+      const status = response.status();
+      const headers = response.headers();
+      if (status === 200 && /^text\/html\b/i.test(headers['content-type'] ?? '')) {
+        return calendarWeekMatchesAccount(await response.text(), account) ? 'ready' : 'unavailable';
+      }
+      if (status === 401) return 'session_required';
+      if (status < 300 || status >= 400 || !headers.location) return 'unavailable';
+      const next = new URL(headers.location, url);
+      if (next.origin === 'https://accounts.google.com') return 'session_required';
+      if (next.origin !== 'https://calendar.google.com' || !next.pathname.startsWith('/calendar/u/0/r/') ||
+          next.searchParams.has('authuser')) return 'unavailable';
+      url = next;
+    } catch { return 'unavailable'; }
+    finally { await response?.dispose(); }
+  }
+  return 'unavailable';
+}
+
+async function signIn(account, saved) {
   let browser;
   try {
     browser = await chromium.launch({ channel: 'chrome', headless: false });
@@ -28,16 +56,29 @@ async function signIn(account) {
   }
   let state;
   try {
-    const context = await browser.newContext();
+    const context = await browser.newContext(saved ?? {});
     const page = await context.newPage();
+    // Sign-in redirects can destroy the page context, so read the UA before navigating on macOS.
+    const userAgent = macOS ? await page.evaluate(() => navigator.userAgent) : null;
     await page.goto(driveHome, { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {});
     progress({ state: 'browser_opened', account, signInPage: page.url().startsWith('https://accounts.google.com/') });
     const deadline = Date.now() + 10 * 60_000;
+    let calendarOpened = false;
     while (browser.isConnected() && !page.isClosed() && Date.now() < deadline) {
       const check = await checkGoogleSession(context.request, account);
       if (check.state === 'session_ready') {
+        if (macOS) {
+          if (!calendarOpened) {
+            calendarOpened = true;
+            await page.goto(calendarHome, { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {});
+            progress({ state: 'calendar_opened', signInPage: page.url().startsWith('https://accounts.google.com/') });
+          }
+          const calendar = await calendarSession(context.request, account);
+          if (calendar === 'unavailable') return { result: { state: 'browser_calendar_unverified' } };
+          if (calendar !== 'ready') { await delay(2500); continue; }
+        }
         state = {
-          userAgent: await page.evaluate(() => navigator.userAgent),
+          userAgent: userAgent ?? await page.evaluate(() => navigator.userAgent),
           storageState: googleStorageState(await context.storageState()),
         };
         break;
@@ -55,6 +96,10 @@ async function signIn(account) {
   const verified = await openRequest(state, account);
   if (!verified.http) return { result: { state: 'standalone_session_unverified', googleState: verified.result.state } };
   try {
+    if (macOS && await calendarSession(verified.http, account) !== 'ready') {
+      await verified.http.dispose();
+      return { result: { state: 'standalone_calendar_unverified' } };
+    }
     await saveSession(account, {
       userAgent: state.userAgent,
       storageState: await verified.http.storageState(),
@@ -124,9 +169,18 @@ async function main() {
   const { command, values, account, offset, limit, folder, folderName, files } = input;
   const saved = await loadSession(account);
   let connection = saved ? await openRequest(saved, account) : { result: { state: 'session_required' } };
+  let repairSession;
+  if (macOS && command === 'login' && connection.http) {
+    const calendar = await calendarSession(connection.http, account);
+    if (calendar !== 'ready') {
+      await connection.http.dispose();
+      if (calendar === 'session_required') repairSession = saved;
+      connection = { result: { state: repairSession ? 'session_required' : 'standalone_calendar_unverified' } };
+    }
+  }
   const canSignIn = command !== 'status' && !values['no-login'];
   if (!connection.http && canSignIn && ['session_required', 'account_mismatch'].includes(connection.result.state)) {
-    connection = await signIn(account);
+    connection = await signIn(account, repairSession);
   }
   if (!connection.http) {
     report(connection.result);
