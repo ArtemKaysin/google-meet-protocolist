@@ -5,6 +5,10 @@
   "engines": {
     "node": ">=22"
   },
+  "scripts": {
+    "setup:macos": "node scripts/setup-macos.mjs",
+    "test": "node --test"
+  },
   "dependencies": {
     "playwright-core": "1.65.1"
   }

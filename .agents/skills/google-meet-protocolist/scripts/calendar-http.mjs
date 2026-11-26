@@ -12,6 +12,24 @@ export function calendarWindow(from, to, timeZone) {
   return { lower, upper, formatter };
 }
 
+function calendarInitialData(html) {
+  const script = html.match(/<script\b[^>]*\bid=["']initialdata["'][^>]*>([\s\S]*?)<\/script>/i);
+  return script ? JSON.parse(script[1]) : null;
+}
+
+function calendarWeekData(initial) {
+  const batch = initial?.[39]?.[1];
+  return Array.isArray(batch?.[0]?.[1]) && Array.isArray(batch?.[2]?.[1]) ? batch : null;
+}
+
+export function calendarWeekMatchesAccount(html, account) {
+  const initial = calendarInitialData(html);
+  // The signed-in account is in the page's account block, not the list of calendars,
+  // which can include calendars shared by other accounts.
+  const signedInEmail = initial?.[0]?.[2];
+  return typeof signedInEmail === 'string' && signedInEmail.toLowerCase() === account && Boolean(calendarWeekData(initial));
+}
+
 export async function readCalendar(request, {
   expectedAccount,
   from,
@@ -127,9 +145,8 @@ export async function readCalendar(request, {
   }
 
   function parseWeek(html) {
-    const script = html.match(/<script\b[^>]*\bid=["']initialdata["'][^>]*>([\s\S]*?)<\/script>/i);
-    const batch = script && JSON.parse(script[1])?.[39]?.[1];
-    if (!Array.isArray(batch?.[0]?.[1]) || !Array.isArray(batch?.[2]?.[1])) return null;
+    const batch = calendarWeekData(calendarInitialData(html));
+    if (!batch) return null;
     // The web response uses positional arrays for events, calendars and the selected set.
     return {
       events: batch[0][1].map(parseRecord).filter(Boolean),
