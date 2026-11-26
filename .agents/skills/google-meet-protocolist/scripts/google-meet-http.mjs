@@ -47,7 +47,7 @@ async function calendarSession(http, account) {
   return 'unavailable';
 }
 
-async function signIn(account, saved) {
+async function signIn(account, { verifyCalendar, saved }) {
   let browser;
   try {
     browser = await chromium.launch({ channel: 'chrome', headless: false });
@@ -67,7 +67,7 @@ async function signIn(account, saved) {
     while (browser.isConnected() && !page.isClosed() && Date.now() < deadline) {
       const check = await checkGoogleSession(context.request, account);
       if (check.state === 'session_ready') {
-        if (macOS) {
+        if (verifyCalendar) {
           if (!calendarOpened) {
             calendarOpened = true;
             await page.goto(calendarHome, { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {});
@@ -96,7 +96,7 @@ async function signIn(account, saved) {
   const verified = await openRequest(state, account);
   if (!verified.http) return { result: { state: 'standalone_session_unverified', googleState: verified.result.state } };
   try {
-    if (macOS && await calendarSession(verified.http, account) !== 'ready') {
+    if (verifyCalendar && await calendarSession(verified.http, account) !== 'ready') {
       await verified.http.dispose();
       return { result: { state: 'standalone_calendar_unverified' } };
     }
@@ -167,8 +167,11 @@ async function main() {
     return;
   }
   const { command, values, account, offset, limit, folder, folderName, files } = input;
+  const verifyCalendar = macOS && (command === 'login' || command === 'list');
+  const canSignIn = command !== 'status' && !values['no-login'];
   const saved = await loadSession(account);
   let connection = saved ? await openRequest(saved, account) : { result: { state: 'session_required' } };
+  const canRepairCalendar = verifyCalendar && canSignIn && Boolean(connection.http);
   let repairSession;
   if (macOS && command === 'login' && connection.http) {
     const calendar = await calendarSession(connection.http, account);
@@ -178,22 +181,31 @@ async function main() {
       connection = { result: { state: repairSession ? 'session_required' : 'standalone_calendar_unverified' } };
     }
   }
-  const canSignIn = command !== 'status' && !values['no-login'];
   if (!connection.http && canSignIn && ['session_required', 'account_mismatch'].includes(connection.result.state)) {
-    connection = await signIn(account, repairSession);
+    connection = await signIn(account, { verifyCalendar, saved: repairSession });
   }
   if (!connection.http) {
     report(connection.result);
     process.exitCode = 3;
     return;
   }
-  const { http, result } = connection;
+  let { http } = connection;
   try {
     if (command === 'list') {
-      report(await readCalendar(http, {
+      const calendarOptions = {
         expectedAccount: account, from: values.from, to: values.to, timeZone: values['time-zone'],
         queries: values.query, people: values.person, calendarNames: values.calendar,
-      }));
+      };
+      let calendar = await readCalendar(http, calendarOptions);
+      if (calendar.state === 'session_required' && canRepairCalendar) {
+        await http.dispose();
+        http = undefined;
+        const repaired = await signIn(account, { verifyCalendar, saved });
+        http = repaired.http;
+        calendar = http ? await readCalendar(http, calendarOptions) : repaired.result;
+      }
+      if (macOS && !['ready', 'partial'].includes(calendar.state)) process.exitCode = 3;
+      report(calendar);
     } else if (command === 'videos') {
       report(await findDriveVideos(http, { queries: values.query, folder, folderName, recursive: values.recursive }));
     } else if (command === 'metadata' || command === 'captions') {
@@ -203,10 +215,10 @@ async function main() {
       })));
       report(results.length === 1 ? results[0] : { state: results.every(file => file.state === 'ready') ? 'ready' : 'partial', files: results });
     } else {
-      report(result);
+      report(connection.result);
     }
   } finally {
-    await http.dispose();
+    await http?.dispose();
   }
 }
 
